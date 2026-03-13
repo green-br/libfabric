@@ -554,6 +554,10 @@ static void cxip_query_if_list(struct slist *if_list)
 			CXIP_LOG("CXI netdev not found for device: %s\n",
 				 cxi_dev_list->info[i].device_name);
 			netdev = strdup("DNE");
+			if (getenv("CXIP_DEFAULT_LINK"))
+				link = atoi(getenv("CXIP_DEFAULT_LINK"));
+			if (getenv("CXIP_DEFAULT_SPEED"))
+				speed = atoi(getenv("CXIP_DEFAULT_SPEED"));
 		} else {
 			ret = netdev_link(netdev, &link);
 			if (ret)
