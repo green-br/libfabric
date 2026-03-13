@@ -6,6 +6,7 @@
 #include "cxip.h"
 #include "ofi.h"
 #include "ofi_str.h"
+#include <sys/stat.h>
 
 #define CXIP_DBG(...) _CXIP_DBG(FI_LOG_FABRIC, __VA_ARGS__)
 #define CXIP_WARN(...) _CXIP_WARN(FI_LOG_FABRIC, __VA_ARGS__)
@@ -142,6 +143,32 @@ static int cxip_nic_get_rgroup_vni_ss_env(struct cxip_if *nic_if,
 	return FI_SUCCESS;
 }
 
+/* Find current process' network namespace if available.
+ *
+ * Return 0 for success and value in *netns, or -1 for failure (no
+ * network namespace support, or can't locate it). In this case the
+ * *netns value is set to '0' which is the invalid inode/invalid netns
+ * value. */
+static int cxip_process_network_namespace(unsigned int *netns)
+{
+	int ret;
+	struct stat file_stat;
+	ret = stat("/proc/self/ns/net", &file_stat);
+	if(ret<0) {
+		CXIP_INFO("failed to stat /proc/self/ns/net (no namespace support or none set?): %d:%s\n",
+			  errno, strerror(errno));
+		/* this is the 'invalid inode', so 'invalid netns' value */
+		*netns = 0;
+		goto out;
+	}
+	/* we use the inode as the namespace identifier */
+	*netns = file_stat.st_ino;
+	ret = 0;
+
+out:
+	return ret;
+}
+
 static int cxip_nic_get_best_rgroup_vni(struct cxip_if *nic_if,
 					unsigned int *rgroup,
 					unsigned int *vni)
@@ -150,15 +177,23 @@ static int cxip_nic_get_best_rgroup_vni(struct cxip_if *nic_if,
 	struct cxil_svc_list *svc_list;
 	uid_t uid;
 	gid_t gid;
+	unsigned int netns;
 	int i;
 	int j;
 	struct cxi_svc_desc *desc;
 	int found_uid;
 	int found_gid;
+	int found_netns;
 	int found_unrestricted;
 
 	uid = geteuid();
 	gid = getegid();
+
+	ret = cxip_process_network_namespace(&netns);
+
+	if(ret < 0) {
+		CXIP_WARN("cxip_process_network_namespace failed, proceeding without network namespace support\n");
+	}
 
 	ret = cxil_get_svc_list(nic_if->dev, &svc_list);
 	if (ret) {
@@ -174,6 +209,7 @@ static int cxip_nic_get_best_rgroup_vni(struct cxip_if *nic_if,
 	 */
 	found_uid = -1;
 	found_gid = -1;
+	found_netns = -1;
 	found_unrestricted = -1;
 
 	for (i = svc_list->count - 1; i >= 0; i--) {
@@ -197,6 +233,10 @@ static int cxip_nic_get_best_rgroup_vni(struct cxip_if *nic_if,
 				 desc->members[j].svc_member.gid == gid &&
 				 found_gid == -1)
 				found_gid = i;
+			else if (desc->members[j].type == CXI_SVC_MEMBER_NET_NS &&
+				 desc->members[j].svc_member.netns == netns &&
+				 found_netns == -1)
+				found_netns = i;
 		}
 	}
 
@@ -205,6 +245,8 @@ static int cxip_nic_get_best_rgroup_vni(struct cxip_if *nic_if,
 		i = found_uid;
 	else if (found_gid != -1) {
 		i = found_gid;
+	} else if (found_netns != -1) {
+		i = found_netns;
 	} else if (found_unrestricted != -1) {
 		i = found_unrestricted;
 	} else {
